@@ -38,6 +38,12 @@ class DVRPEnv(gym.Env):
         # self.reset()
 
     def reset(self, seed=None):
+        if seed is not None:
+            np.random.seed(seed)
+        else:
+            # get a random seed
+            seed = np.random.randint(0, 1000)
+            np.random.seed(seed)
         # Reset episode-specific variables
         self.time_step = 0                  # episode time step
         self.new_task_period = 60           # set this number to generate new tasks after some interval
