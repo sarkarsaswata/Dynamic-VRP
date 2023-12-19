@@ -6,7 +6,8 @@ from scipy.stats import poisson
 from stable_baselines3.common.env_checker import check_env
 import matplotlib.pyplot as plt
 import os
-
+import pandas as pd
+import seaborn as sns
 class DVRPEnv(gym.Env):
     """
     Custom Gym environment for the Discrete Vehicle Routing Problem (DVRP).
@@ -46,7 +47,9 @@ class DVRPEnv(gym.Env):
         self.max_time_steps = 10            # set this number to draw discrete numbers from poisson
         self.total_tasks_serviced = 0       # the number of tasks serviced
         self.task_arrival_lst = poisson.rvs(mu=self.task_arrival_rate, size=self.max_time_steps) + 1
-        self.total_tasks = self.task_arrival_lst.sum()
+        
+        # get total number of tasks in the environment
+        self.total_tasks = np.sum(self.task_arrival_lst)
 
         # Initian state is the copy of self.obs_low
         self.state = self.obs_low.copy()
@@ -71,13 +74,14 @@ class DVRPEnv(gym.Env):
 
     def generate_new_tasks(self):
         # Check if there are more steps to generate tasks
-        if self.task_step < len(self.task_arrival_lst):
-            # generate the number of new tasks
+        if self.task_step < self.max_time_steps:
+            # get the number of new tasks to generate from task_arrival_lst with task_step as index
+            self.task_arrival_lst = np.array(self.task_arrival_lst)
             num_new_tasks = self.task_arrival_lst[self.task_step]
             # if there are no new tasks, return the task locations
             if num_new_tasks == 0:
                 return self.task_loc
-            
+
             # otherwise, generate the new tasks
             else:
                 # generate the new task locations
@@ -116,7 +120,7 @@ class DVRPEnv(gym.Env):
         if self.time_step % self.new_task_period == 0:
             self.task_step += 1
             # Check if there are more steps in task_arrival_lst
-            if self.task_step < len(self.task_arrival_lst):
+            if self.task_step < self.max_time_steps:
                 self.task_loc = self.generate_new_tasks()
 
         # Update state
@@ -204,10 +208,7 @@ class DVRPEnv(gym.Env):
             plt.legend(loc="upper left")
             plt.xlim(0, self.size)
             plt.ylim(0, self.size)
-            plt.savefig(os.path.join(folder, f"{self.time_step}.png"))
-
-        
-    
+            plt.savefig(os.path.join(folder, f"{self.time_step}.png"))    
 
 if __name__ == "__main__":
     # Create environment instance
@@ -222,10 +223,10 @@ if __name__ == "__main__":
     total_reward = 0
 
     
-    while not done:
+    while not done and step < 10:
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
-        # env.render()
+        env.render()
         total_reward += reward
 
         done = terminated or truncated
