@@ -85,6 +85,12 @@ def train_model(args):
     # close WandB
     wandb.finish()
 
+    # save the trained model
+    model_save_dir = os.path.join('saved_model', f'{args.model}_model')
+    os.makedirs(model_save_dir, exist_ok=True)
+    model_path = os.path.join(model_save_dir, f'{args.model}_{args.rate}')
+    model.save(model_path)
+
 if __name__ == '__main__':
     # Parse command line arguments
     args = parse_args()
