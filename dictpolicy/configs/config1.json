@@ -1,0 +1,8 @@
+{
+    "env_size": 10,
+    "task_arrival_rate": 0.5,
+    "new_task_period": 30,
+    "render_mode": "rgb_array",
+    "max_step": 10,
+    "buffer_time": 50
+}

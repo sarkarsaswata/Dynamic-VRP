@@ -59,12 +59,12 @@ class DVRPEnv(gym.Env):
         self.state = self.obs_low.copy()
 
         # Initialize the UAV's position in the middle of the arena
-        self.uav_pos = np.array([self.size // 2, self.size // 2], dtype=np.float32)
-        self.depot = self.uav_pos.copy()
-        self.state[:2] = self.uav_pos
-
+        self.uav_pos = np.ones(shape=(2, ), dtype=np.int32) * 2
+        self.depot = np.array([self.size - 1, self.size - 1], dtype=np.int32)
         # create an array of task locations which are the slice of self.state from element 2 to 2 + 2 * self.max_total_tasks
         self.task_loc = self.state[2:2 + 2 * self.max_total_tasks]
+        # create an array of task times which are the slice of self.state from element 2 + 2 * self.max_total_tasks to the end
+        self.times = self.state[2 + 2 * self.max_total_tasks:-2]
         # use a helper function to generate new tasks
         self.task_loc = self.generate_new_tasks()
 
