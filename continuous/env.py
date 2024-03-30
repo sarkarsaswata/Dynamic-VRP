@@ -1,29 +1,32 @@
+"""
+This file, env.py, implements the environment for the DVRP problem using the OpenAI Gym API.
+"""
+
+from typing import Tuple, Union
 import gymnasium as gym
-from networkx import union
+import gymnasium.spaces as spaces
 import numpy as np
 import pygame
-import gymnasium.spaces as spaces
 from gymnasium.utils import seeding
-from typing import Tuple, Union
-from task import TaskStatus
-from obs_warpper import DictToFlatObservationWrapper
-from gen_tasks import PoissonTaskGenerator
 from stable_baselines3.common.env_checker import check_env
+from task import TaskStatus
+from gen_tasks import PoissonTaskGenerator
 
 class DVRPEnv(gym.Env):
     metadata = {'render_modes': ["human", "rgb_array"],
                 'render_fps': 4
                 }
-    def __init__(self, size=10, lam=0.5, n_tasks=10, global_max_step=350, render_mode=None):
+    def __init__(self, size=10, lam=0.5, n_tasks=10, max_omega = 20, global_max_step=200, render_mode=None):
         """
         Initialize the DVRPEnv class.
 
         Parameters:
-        - size (int): The size of the environment grid.
-        - lam (float): The task arrival rate.
-        - n_tasks (int): The maximum number of tasks in the episode that will be used to train the agent.
+        - size (int): The size of the environment.
+        - lam (float): The task arrival rate (lambda) for the Poisson task generator.
+        - n_tasks (int): The maximum number of tasks to generate in the episode that will be used to train the agent.
+        - max_omega (int): The maximum angular velocity of the agent.
         - global_max_step (int): The maximum time in the environment.
-        - render_mode (str): The rendering mode for visualization, must be in metadata['render_modes'].
+        - render_mode (str or None): The mode to use for rendering the environment. If None, the environment will not be rendered.
 
         Returns:
         None
@@ -33,6 +36,7 @@ class DVRPEnv(gym.Env):
         self.size = size
         self.rate = lam
         self.max_tasks = n_tasks
+        self.MAX_ANGULAR_VELOCITY = max_omega * np.pi / 180
         self.max_time = global_max_step
         self.window_size = 512  # The size of the pygame window
 
@@ -140,6 +144,11 @@ class DVRPEnv(gym.Env):
     def render(self):
         if self.render_mode == "rgb_array":
             return self._render_frame()
+        
+    def close(self):
+        if self.window is not None:
+            pygame.display.quit()
+            pygame.quit()
     
     def _get_tasks(self, time:float) -> np.ndarray:
         """
@@ -433,8 +442,12 @@ class DVRPEnv(gym.Env):
             )
 
 if __name__ == "__main__":
-    env = DVRPEnv(size=10, lam=0.5, n_tasks=10, global_max_step=350, render_mode="human")
-    env.metadata['render_fps'] = 0.1
+    import json
+    env_params = "/home/moonlab/MS_WORK/ms_thesis/continuous/configs/env_config.json"
+    with open(env_params, "r") as f:
+        env_params = json.load(f)
+
+    env = DVRPEnv(**env_params)
     obs, info = env.reset()
     done = False
     step = 0
@@ -457,4 +470,5 @@ if __name__ == "__main__":
         print(f"Observation: {obs}")
         print(terminated, truncated)
         step += 1
+        print("-"*50)
     
