@@ -7,145 +7,102 @@ import gymnasium as gym
 import gymnasium.spaces as spaces
 import gymnasium.utils.seeding as seeding
 import numpy as np
-import seaborn as sns
-import gc
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from decimal import Decimal
-from gymnasium.wrappers.flatten_observation import FlattenObservation
-from stable_baselines3.common.env_checker import check_env
-from dvrp.components.task import Task, TaskStatus
-from dvrp.components.gen_tasks import PoissonTaskGenerator
+import pygame
+from dvrp.utils.gen_tasks import PoissonTaskGenerator
+from dvrp.utils.task import TaskStatus
+
 
 
 class DVRPEnv(gym.Env):
     metadata = {'render_modes': ["human", "rgb_array"],
-                'render_fps': 4
-                }
-    def __init__(self, size=10, lam=0.5, n_tasks=10, max_omega = 20, global_max_step=200, render_mode=None):
-        """
-        Initialize the DVRPEnv class.
-
-        Parameters:
-        - size (int): The size of the environment.
-        - lam (float): The task arrival rate (lambda) for the Poisson task generator.
-        - n_tasks (int): The maximum number of tasks to generate in the episode that will be used to train the agent.
-        - max_omega (int): The maximum angular velocity of the agent.
-        - global_max_step (int): The maximum time in the environment.
-        - render_mode (str or None): The mode to use for rendering the environment. If None, the environment will not be rendered.
-
-        Returns:
-        None
-        """
+                "render_fps": 4
+    }
+    def __init__(self, size=10, lam=0.5, n_tasks=10, max_time=200, render_mode=None):
         super(DVRPEnv, self).__init__()
-        assert 0.5 <= lam <= 0.9, "lambda must be in the range [0.5, 0.9]"
+        assert 0.5 <= lam and lam <= 0.9, "task arrival rate must be between 0.5 and 0.9"
         self.size = size
-        self.rate = lam
-        self.max_tasks = n_tasks
-        self.MAX_ANGULAR_VELOCITY = max_omega * np.pi / 180
-        self.max_time = global_max_step         # The maximum time for the tasks
-        self.total_time = self.max_time + 50    # The total time for the environment episode #250
-
-        # action space: angular velocity of the agent; normalized to [-1, 1]
-        action_low = np.array([-1])
-        action_high = np.array([1])
-        self.action_space = spaces.Box(low=action_low, high=action_high, shape=(1, ), dtype=np.float32)
-
-        # observation space
-        self.observation_space = spaces.Dict(
-            {
-                "position_agent" : spaces.Box(low=0, high=self.size, shape=(2, ), dtype=np.float32),
-                "position_task" : spaces.Box(low=0, high=self.size, shape=(self.max_tasks*2, ), dtype=np.float32),
-                "time_clock" : spaces.Box(low=0, high=self.max_time*2, shape=(self.max_tasks, ), dtype=np.float32),
-                "z" : spaces.Box(low=-1, high=1, shape=(1, ), dtype=np.float32)
-            }
-        )
+        self.lam = lam
+        self.n_tasks = n_tasks
+        self.max_time = max_time
+        self.total_time = self.max_time * 2.5
+        # action space: Discrete
+        self.action_space = spaces.Discrete(8)
+        # observation space: Dict
+        self.observation_space = spaces.Dict({
+            "agent_pos": spaces.Box(low=0, high=self.size, shape=(2,), dtype=np.float16),
+            "tasks_pos": spaces.Box(low=0, high=self.size, shape=(self.n_tasks*2, ), dtype=np.float16),
+            "clocks": spaces.Box(low=0, high=self.max_time*2, shape=(self.n_tasks,), dtype=np.float16),
+            # "distances": spaces.Box(low=0, high=self.size*np.sqrt(2), shape=(self.n_tasks,), dtype=np.float16),
+            "progress": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float16)
+        })
 
         assert render_mode is None or render_mode in self.metadata['render_modes']
+        self.window_size = 512          # The size of pygame window
+        self.window = None
+        self.pyclock = None
         self.render_mode = render_mode
-
-        self.task_colors = dict()
-
+    
     def reset(self, seed=None, options=None):
-        """
-        Resets the environment to its initial state.
-
-        Args:
-            seed (int): Seed for the random number generator. If None, a random seed will be used.
-            options (dict): Additional options for resetting the environment. Default set to None.
-
-        Returns:
-            obs (dict): The initial observation of the environment.
-            info (dict): Additional information about the environment's state.
-        """
-        _, seed = seeding.np_random(seed)
-        super().reset(seed=seed, options=options)
-        self.time = 0           # Time in seconds 
-        self.steps = 0          # The number of steps/action taken by the agent
-        self.v = 1              # velocity of the agent to 1
-        self.yaw = 0            # angular velocity of the agent to 0
-        self.dt = 0.1           # delta time 0..1s for executing the action
-        self.tasks_done = 0     # number of tasks serviced by the agent
-
-        # Agent's initial position is the middle of the environment
-        self.agent_pos = np.array([self.size // 2, self.size // 2], dtype=np.float32)
-
-        # generate tasks using the poisson task generator and store the arrival times in self.arrival_times list
-        self.tasks_list = PoissonTaskGenerator(total_tasks=self.max_tasks, max_time=self.max_time, seed=seed).get_tasks(lam=self.rate)
-        self.arrival_times = np.array([task.time_created for task in self.tasks_list], dtype=np.float32).reshape(-1)
-
-        # Initialize the tasks, clocks, and progress arrays
-        self.tasks_pos = self._get_tasks(time=self.time)
-        self.clocks = self._get_clocks()
-        self.progress = self._get_progress(time=self.time)
-        
-        self.agent_on_task = self._is_agent_on_task()
-
-        obs = self._get_observation()
+        _, SEED = seeding.np_random(seed)
+        super().reset(seed=SEED, options=options)
+        self.steps = 0
+        self.tasks_done = 0
+        # Agent position is initialized at the center of the environment
+        self.pos_agent = np.array([self.size/2, self.size/2], dtype=np.float16)
+        # Generate tasks
+        self.tasks_list = PoissonTaskGenerator(total_tasks=self.n_tasks, max_time=self.max_time, seed=SEED).get_tasks(self.lam)
+        self.arrival_times = np.array([task.time_created for task in self.tasks_list], dtype=np.float16)
+        # Initialize the tasks and clocks
+        self.pos_tasks = self._get_tasks(self.steps)
+        self.clocks = np.zeros((self.n_tasks), dtype=np.float16)
+        self.distances = self._get_task_distances()
+        self.progress = np.array([-1], dtype=np.float16)
+        # get the initial observation
+        obs = self._get_obs()
         info = self._get_info()
 
         return obs, info
     
+    def reset_(self):
+        self.tasks_list = self.tasks_list
+        self.arrival_times = self.arrival_times
+        self.steps = 0
+        self.pos_agent = np.array([self.size/2, self.size/2], dtype=np.float16)
+        self.pos_tasks = self._get_tasks(self.steps)
+        self.clocks = np.zeros((self.n_tasks), dtype=np.float16)
+        self.distances = self._get_task_distances()
+        self.progress = np.array([-1], dtype=np.float16)
+        obs = self._get_obs()
+        info = self._get_info()
+
+        return obs, info
+    
+    def _get_task_distances(self) -> np.ndarray:
+        distances = np.zeros(self.n_tasks, dtype=np.float16)
+        task_pos = self.pos_tasks.reshape((self.n_tasks, 2))
+        non_zero_indices = np.any(task_pos != 0, axis=1)
+        distances[non_zero_indices] = np.linalg.norm(self.pos_agent - task_pos[non_zero_indices], axis=1)
+        return distances
+    
     def step(self, action):
-        """
-        Perform a step in the environment.
-
-        Args:
-            action: The action to be taken by the agent.
-
-        Returns:
-            obs (object): The observation of the environment after the step.
-            reward (float): The reward obtained from the step.
-            terminated (bool): Whether the episode is terminated after the step.
-            truncated (bool): Whether the episode is truncated after the step.
-            info (dict): Additional information about the step.
-
-        """
-        # increase the time step with self.dt and round the value to one decimal place
-        self.time = np.round(self.time + self.dt, 1)
-        self.steps += 1             # number of steps/actions taken by the agent
-        self.agent_pos = self._move_agent(action)
-        self.clocks = self._update_clocks()
-        self.agent_on_task = self._is_agent_on_task()
-
-        if self.agent_on_task:
-            # if the agent is on a task, then service the task
-            self.tasks_pos, self.clocks = self._remove_task()
-            self.tasks_done = sum(task.status == TaskStatus.SERVICED for task in self.tasks_list)
-
-        self.tasks_pos = self._get_tasks(time=self.time)
-        self.progress = self._get_progress(time=self.time)
+        self.steps += 1
+        self.pos_agent = self._move_agent(action)
+        self.clocks = self._update_clocks(time=self.steps)
+        self.agent_on_task = self._check_agent_on_task()
         terminated = self._is_terminated()
         truncated = self._is_truncated()
-        if terminated or truncated:
-            # get the list of tasks that are pending
-            pending_tasks = [task for task in self.tasks_list if task.status == TaskStatus.PENDING and task.time_created <= self.time]
-            # mark the pending tasks as incomplete
-            for task in pending_tasks:
-                task.incomplete(self.time)
-            
-        reward = self._get_reward(term=terminated, trunc=truncated)
-        obs = self._get_observation()
+        reward = self._get_reward3(terminated, truncated)
+
+        if self.agent_on_task:
+            self.pos_tasks, self.clocks = self._remove_task()
+            self.tasks_done = sum(task.status == TaskStatus.SERVICED for task in self.tasks_list)
+        
+        self.pos_tasks = self._get_tasks(self.steps)
+        self.distances = self._get_task_distances()
+        self.progress = self._get_progress(self.steps)
+
+        
+        obs = self._get_obs()
         info = self._get_info()
 
         if self.render_mode == "human":
@@ -153,367 +110,296 @@ class DVRPEnv(gym.Env):
 
         return obs, reward, terminated, truncated, info
     
+    def _get_tasks(self, steps):
+        if steps == 0:
+            task_pos = np.zeros((self.n_tasks*2), dtype=np.float16)
+        elif hasattr(self, 'pos_tasks') and self.pos_tasks is not None:
+            task_pos = np.copy(self.pos_tasks)
+        matching_indices = np.where(self.arrival_times == steps)[0]
+
+        if matching_indices.size == 0:
+            return task_pos
+        
+        for index in matching_indices:
+            task = self.tasks_list[index]
+            x_index = index*2
+            y_index = x_index + 1
+            task_pos[x_index] = task.location[0]
+            task_pos[y_index] = task.location[1]
+        
+        return task_pos
+    
+    def _get_obs(self):
+        pos_tasks = np.concatenate((self.pos_tasks[self.pos_tasks != 0], self.pos_tasks[self.pos_tasks == 0]))
+        clocks = np.concatenate((self.clocks[self.clocks != 0], self.clocks[self.clocks == 0]))
+        return {
+            "agent_pos": self.pos_agent,
+            "tasks_pos": pos_tasks,
+            "clocks": clocks,
+            "progress": self.progress,
+            # "distances": self.distances
+        }
+    
+    def _get_info(self):
+        return {
+            "tasks_done": self.tasks_done
+        }
+    
+    def _move_agent(self, action):
+        move = self._action_to_move(action)
+        agent_pos = self.pos_agent + move
+        # agent_pos = np.clip(agent_pos, 0, self.size-1)
+        return agent_pos
+    
+    def _action_to_move(self, action):
+        # Define the mapping from actions to movements
+        movements = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]
+        # Get the movement corresponding to the action
+        move = movements[action]
+        return np.array(move, dtype=np.float16)
+    
+    def _check_agent_on_task(self) -> bool:
+        task_serviced = False
+
+        for task in self.tasks_list:
+            if task.is_pending and (task.location == self.pos_agent).all() and task.time_created < self.steps:
+                task.service_task(self.steps)
+                task_serviced = True
+                
+        return task_serviced
+    
+    def _remove_task(self):
+        task_pos, clocks = np.copy(self.pos_tasks), np.copy(self.clocks)
+        # get indices of serviced tasks
+        serviced_indices = np.where(np.fromiter((task.is_serviced for task in self.tasks_list), dtype=bool))[0]
+        # mark serviced tasks as removed in the tasks pos array
+        task_pos[serviced_indices*2] = 0
+        task_pos[serviced_indices*2+1] = 0
+        # Reset the clocks of serviced tasks to 0
+        clocks[serviced_indices] = 0
+        return task_pos, clocks
+    
+    def _update_clocks(self, time) -> np.ndarray:
+        clocks = np.copy(self.clocks)
+        # Find the indices of pending tasks with creation times less than the current step; not touching the task that is created at the current step
+        pending_indices = [i for i, task in enumerate(self.tasks_list) if task.is_pending and task.time_created < time]
+        # Increment the clocks of the pending tasks
+        clocks[pending_indices] += 1
+        return clocks
+    
+    # def _get_progress(self, steps) -> np.ndarray:
+    #     min, max = -1, 1
+    #     progress = float(steps/self.total_time)
+    #     progress = min + (progress * (max - min))
+    #     progress = round(progress, 4)
+    #     return np.array([progress], dtype=np.float16)
+    
+    def _get_progress(self, steps) -> np.ndarray:
+        return np.array([steps], dtype=np.float16)
+    
+    def _is_terminated(self) -> bool:
+        return self.tasks_done == self.n_tasks
+    
+    def _is_truncated(self) -> bool:
+        # check if the agent is out of the boundary of arena
+        out_of_bounds = np.any(self.pos_agent < 0) or np.any(self.pos_agent >= self.size)
+        return self.steps >= self.total_time or out_of_bounds
+        # return self.steps >= self.total_time
+    
+    def _get_reward1(self, terminated, truncated) -> float:
+        reward = 0
+        if not self.agent_on_task:
+            reward -= np.max(self.clocks)
+        else:
+            if terminated:
+                reward = 2000
+            else:
+                # reshape pos_tasks into a 2D array of shape (10, 2)
+                pos_tasks_reshaped = self.pos_tasks.reshape(-1, 2)
+                # find the task index the agent is currently servicing
+                task_indices = np.argwhere((pos_tasks_reshaped == self.pos_agent).all(axis=1)).flatten()
+                if task_indices.size > 0:  # check if there's a match
+                    task_index = task_indices[0]
+                    # get the clock value with the task index
+                    reward = self.clocks[task_index]
+
+        if truncated:
+            reward -= 1000
+
+        return float(reward)
+    
+    
+    def _get_reward2(self, terminated, truncated) -> float:
+        reward = 0
+        if self.agent_on_task:
+            reward += self._calculate_waittime_reward(max_wait_time=30)
+            return float(reward)
+        else:
+            reward -= np.max(self.clocks)
+        
+        if terminated:
+            # reward += self._calculate_completion_reward(time=self.steps)
+            reward += 2000
+            return float(reward)
+        
+        if truncated:
+            reward = -2000
+            return float(reward)
+        
+        return float(reward)
+    
+    def _get_reward3(self, terminated, truncated) -> float:
+        reward = 0
+        if self.agent_on_task:
+            reward += self._calculate_waittime_reward(max_wait_time=50)
+        else:
+            # reward -= 0.001*np.max(self.clocks)
+            reward = 0
+
+        if terminated:
+            if self.tasks_done > 0:
+                reward = 20
+        elif truncated:
+            if self.tasks_done != 0:
+                reward = -(self.n_tasks - self.tasks_done)/self.n_tasks
+            else:
+                reward = -1
+        
+        return float(reward)
+    
+    def _calculate_waittime_reward(self, max_wait_time) -> float:
+        reward = 0
+        wait_times = []
+        # get the task.wait_time if the task is serviced at the current step
+        for task in self.tasks_list:
+            if (task.is_serviced and task.time_serviced == self.steps):
+                wait_times.append(task.wait_time)
+        wait_times = np.array(wait_times)  # move this line outside of the for loop
+        if len(wait_times) > 0:
+            normalized_wait_times = 1 - wait_times / max_wait_time
+            reward = np.sum(np.exp(normalized_wait_times))*2
+            return float(reward)
+        else:
+            return reward
+    
+    # def _calculate_completion_reward(self, time) -> float:
+    #     # design a linear decay function for the reward as a function of termination time
+    #     # max reward is 1, min reward is 0
+    #     min, max = 0, 1
+    #     reward = float(time/self.total_time)
+    #     reward = 1 - (min + (max - min) * reward)
+    #     return reward
+    
     def render(self):
         if self.render_mode == "rgb_array":
             return self._render_frame()
-        
-    def close(self):
-        pass
-    
-    def _get_tasks(self, time: float) -> np.ndarray:
-        """
-        Get the locations of tasks at a given time. Initiated in the reset method.
-
-        Parameters:
-        - time (float): Current time.
-
-        Returns:
-        - tasks_locs (numpy.ndarray): An array containing the locations of tasks at the given time.
-        """
-        if hasattr(self, 'tasks_pos'):
-            tasks_locs = np.copy(self.tasks_pos)
-        else:
-            tasks_locs = np.zeros((self.max_tasks*2, ), dtype=np.float32)
-
-        matching_indices = np.where(self.arrival_times == time)[0]
-        if matching_indices.size == 0:
-            return tasks_locs
-
-        for index in matching_indices:
-            task = self.tasks_list[index]
-            x_index = index * 2
-            y_index = x_index + 1
-            tasks_locs[x_index] = task.location[0]
-            tasks_locs[y_index] = task.location[1]
-        return tasks_locs
-    
-    def _get_clocks(self) -> np.ndarray:
-        """
-        Returns:
-            np.ndarray: Array of clocks.
-        """
-        return np.zeros((self.max_tasks, ), dtype=np.float32)
-    
-    def _get_progress(self, time: float) -> np.ndarray:
-        """
-        Calculate the progress based on the given time. Initiated in the reset method.
-
-        Parameters:
-        time (float): Current time.
-
-        Returns:
-        np.ndarray: An array containing the calculated progress.
-
-        Raises:
-        ValueError: If the calculated progress is not within the range [-1, 1].
-        """
-        min_progress, max_progress = -1.0, 1.0
-        progress = float(time / self.total_time)
-        progress = min_progress + progress * (max_progress - min_progress)
-        if not min_progress <= progress <= max_progress:
-            raise ValueError(f"Progress must be in the range [-1, 1], but got {progress}")
-        return np.array([progress], dtype=np.float32)
-    
-    def _is_agent_on_task(self) -> bool:
-        """
-        Checks if the agent is on a task location and services the pending tasks. Initiated in the reset method.
-
-        Returns:
-            bool: True if there are tasks serviced, False otherwise.
-        """
-        tasks_serviced = False
-        agent_pos = np.copy(self.agent_pos)
-
-        task_statuses = np.array([task.status for task in self.tasks_list], dtype=bool)
-        task_times = np.array([task.time_created for task in self.tasks_list], dtype=np.float32)
-
-        task_is_pending = task_statuses == TaskStatus.PENDING
-        task_is_created_before_current_time = task_times < self.time
-
-        pending_indices = np.where(task_is_pending & task_is_created_before_current_time)[0]
-
-        for index in pending_indices:
-            task = self.tasks_list[index]
-            if np.allclose(agent_pos, task.location, atol=0.1):
-                task.service(self.time)
-                tasks_serviced = True
-        return tasks_serviced
-    
-    def _get_observation(self) -> dict:
-        """
-        Returns the current observation of the environment.
-
-        Returns:
-            dict: A dictionary containing the following information:
-                - "position_agent": The position of the agent.
-                - "position_task": The positions of the tasks.
-                - "time_clock": The clocks in the environment.
-                - "z": The progress made in the environment.
-        """
-        return {
-            "position_agent" : self.agent_pos,
-            "position_task" : self.tasks_pos,
-            "time_clock" : self.clocks,
-            "z" : self.progress
-        }
-    
-    def _get_info(self) -> dict:
-            """
-            Returns a dictionary containing information about the current state of the environment.
-
-            Returns:
-                dict: A dictionary with the following keys:
-                    - "Current Time in Seconds": The current time in seconds.
-                    - "Number of Tasks Serviced": The number of tasks that have been serviced.
-            """
-            return {
-                "Current Time in Seconds" : self.time,
-                "Number of Tasks Serviced" : self.tasks_done,
-            }
-    
-    def _move_agent(self, action: np.ndarray) -> np.ndarray:
-        """
-        Moves the agent based on the given action. **Used in the `step` method.**
-
-        Args:
-            action (numpy.ndarray): The action to be performed by the agent.
-
-        Returns:
-            numpy.ndarray: The new location of the agent after performing the action.
-
-        Raises:
-            ValueError: If the angular velocity is zero.
-        """
-        # Calculate the action (angular velocity) from the normalized action space
-        scaled_action = action * self.MAX_ANGULAR_VELOCITY
-        
-        agent_location = np.copy(self.agent_pos)
-
-        # Get the angular velocity from the action
-        self.yaw_dot = scaled_action[0]
-
-        if self.yaw_dot == 0:
-            raise ValueError("Angular velocity must not be zero")
-
-        # Calculate the change in x and y coordinates with velocity and angular velocity using the kinematic equations
-        new_yaw = self.yaw + self.yaw_dot*self.dt
-        self.dx = self.v * (np.sin(new_yaw) - np.sin(self.yaw)) / self.yaw_dot
-        self.dy = self.v * (np.cos(self.yaw) - np.cos(new_yaw)) / self.yaw_dot
-        agent_location[0] += self.dx
-        agent_location[1] += self.dy
-
-        # Update the yaw
-        self.yaw = new_yaw
-
-        # Check if the yaw is within the range [-pi, pi]
-        if self.yaw > np.pi:
-            self.yaw -= 2*np.pi
-        if self.yaw < -np.pi:
-            self.yaw += 2*np.pi
-            
-        # return agent_location
-        return np.clip(agent_location, 0, self.size)
-    
-    def _update_clocks(self) -> np.ndarray:
-        """
-        Update the clocks of pending tasks. **Used in the `step` method.**
-
-        This method updates the clocks of pending tasks based on the current time.
-        It checks if a task is pending and if its creation time is less than or equal to the current time.
-        If both conditions are met, the clock for that task is incremented by the time step.
-
-        Returns:
-            numpy.ndarray: A copy of the original clocks array with the updated values.
-        """
-        clocks = np.copy(self.clocks)
-        if not self.tasks_list:
-            return clocks
-
-        # Find the indices of pending tasks with creation times less than to the current time; do not touch the task that is created at the current time
-        pending_indices = [i for i, task in enumerate(self.tasks_list) if task.status == TaskStatus.PENDING and task.time_created < self.time]
-        # Increment the clocks of the pending tasks
-        clocks[pending_indices] += self.dt
-
-        # Round the clocks to 1 decimal place
-        clocks = np.round(clocks, 1)
-
-        return clocks
-    
-    def _remove_task(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Remove serviced tasks from the task list and update the clocks. **Used in the `step` method.**
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: The updated tasks positions and clocks arrays.
-        """
-        task_positions, clocks = np.copy(self.tasks_pos), np.copy(self.clocks)
-        
-        # Get indices of serviced tasks
-        serviced_indices = np.where(np.fromiter((task.is_serviced for task in self.tasks_list), dtype=bool))[0]
-        # Mark serviced tasks as removed in the task_positions array
-        task_positions[serviced_indices * 2] = 0
-        task_positions[serviced_indices * 2 + 1] = 0
-        # Reset clocks associated with serviced tasks to 0
-        clocks[serviced_indices] = 0
-        return task_positions, clocks
-    
-    def _is_terminated(self) -> bool:
-            """
-            Check if the episode is terminated.
-
-            The episode is considered terminated when all the tasks in the task list
-            have been serviced.
-
-            Returns:
-                bool: True if all tasks have been serviced, False otherwise.
-            """
-            return all(task.is_serviced for task in self.tasks_list)
-    
-    def _is_truncated(self) -> bool:
-        """
-        Check if the episode is truncated.
-
-        Returns:
-            bool: True if the agent is truncated, False otherwise.
-        """
-        # create a bool variable to check if agent is out of bounds
-        out_of_bounds = any(self.agent_pos < 0) or any(self.agent_pos > self.size)
-        return self.progress[0] >= 1 or out_of_bounds
-    
-    def _get_reward(self, term: bool, trunc: bool) -> float:
-        """
-        Calculate the reward based on the current state of the environment.
-
-        Parameters:
-        - term (bool): Indicates whether the episode has terminated.
-        - trunc (bool): Indicates whether the episode was truncated.
-
-        Returns:
-        - reward (float): The calculated reward value.
-        """
-        reward = 0
-        if self.agent_on_task:
-            reward += self._calculate_reward(max_wait_time=100)
-        
-        if term:
-            reward += 1
-        
-        if trunc:
-            reward = -1
-
-        return float(reward)
-       
-    def _calculate_reward(self, max_wait_time: Union[int, float]) -> float:
-        """
-        Calculates the reward when agent has serviced tasks.
-
-        Parameters:
-        - max_wait_time (Union[int, float]): The maximum wait time for a task.
-
-        Returns:
-        - reward (float): The calculated reward.
-        """
-        reward = 0
-        if not self.tasks_list:
-            return reward
-
-        # Calculate wait times for all serviced tasks at this step
-        wait_times = np.array([task.wait_time() for task in self.tasks_list if task.status == TaskStatus.SERVICED and task.time_serviced == self.time])
-
-        if len(wait_times) > 0:
-            # Normalize wait times to [0, 1] range
-            norm_wait_times = wait_times / max_wait_time
-
-            # Calculate reward contributions using an exponential decay function
-            reward_contributions = np.exp(-norm_wait_times)
-
-            # Sum up reward contributions for all serviced tasks
-            reward = np.sum(reward_contributions)
-        
-        return float(reward)
     
     def _render_frame(self):
-        """
-        Render the current frame of the environment.
-        This method renders a frame of the environment using Seaborn.
-        """
-        fig, ax = plt.subplots(figsize=(8, 8))
-        try:
-            canvas = FigureCanvas(fig)
-            ax.set_xlim(0, self.size)
-            ax.set_ylim(0, self.size)
-            ax.set_aspect('equal')
+        if self.window is None:
+            pygame.init()
+            pygame.display.init()
+            self.window = pygame.display.set_mode(
+                (self.window_size, self.window_size)
+            )
 
-            # Draw the agent
-            agent_x, agent_y = self.agent_pos[0], self.agent_pos[1]
-            ax.plot(agent_x, agent_y, 'ro', label='Agent')
-            t_idx = 0
-            # Draw the tasks
-            for task in self.tasks_list:
-                if task.status == TaskStatus.PENDING and task.time_created <= self.time:
-                    task_x, task_y = task.location[0], task.location[1]
-                    color = self.task_colors.get(t_idx, np.random.rand(3,))
-                    ax.plot(task_x, task_y, marker='o', color=color, label=f'Task {t_idx}')
-                    self.task_colors[t_idx] = color
-                t_idx += 1
+        if self.pyclock is None:
+            self.pyclock = pygame.time.Clock()
 
-            ax.legend(loc='best')
-            ax.set_xticks(np.arange(0, self.size+1, 1))
-            ax.set_yticks(np.arange(0, self.size+1, 1))
-            ax.set_title(f"Time: {self.time:.1f}s")
-            if self.render_mode == "human":
-                # save the image as file name step_{i}.png where i is the step number
-                # save inside the folder render_frames
-                plt.savefig(f"render_frames/step_{self.steps}.png")
-                del fig, ax, canvas
-                gc.collect()
-            elif self.render_mode == "rgb_array":
-                # return the image as a numpy array
-                canvas.draw()
-                # get the np.array representation of the canvas
-                frame = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-                frame = frame.reshape(canvas.get_width_height()[::-1] + (3,))
-                del fig, ax, canvas
-                gc.collect()
-                return frame
-        finally:
-            plt.close('all')
+        canvas = pygame.Surface((self.window_size, self.window_size))
+        canvas.fill((255, 255, 255))
+        pix_square_size = self.window_size // self.size  # size of a grid cell in pixels
+
+        # Draw the agent
+        agent_pos = self.pos_agent.astype(int)
+        if 0 <= agent_pos[0] < self.size and 0 <= agent_pos[1] < self.size:
+            pygame.draw.circle(
+                canvas,
+                (0, 0, 255),
+                (agent_pos + 0.5) * pix_square_size, # type: ignore
+                pix_square_size / 3, # ensure agent fits within the grid cell
+            )
+
+        # Draw the tasks that are pending and time created is less than or equal to the current step
+        for task in self.tasks_list:
+            task_pos = task.location.astype(int)
+            if task.is_pending and task.time_created <= self.steps:
+                pygame.draw.rect(
+                    canvas,
+                    (255, 0, 0),
+                    pygame.Rect(
+                        pix_square_size * task_pos, # type: ignore
+                        (pix_square_size, pix_square_size),
+                    ),
+                )
+
+        # Draw grid lines
+        for x in range(self.size + 1):
+            pygame.draw.line(
+                canvas,
+                (0, 0, 0),
+                (0, pix_square_size * x),
+                (self.window_size, pix_square_size * x),
+                width=1,
+            )
+            pygame.draw.line(
+                canvas,
+                (0, 0, 0),
+                (pix_square_size * x, 0),
+                (pix_square_size * x, self.window_size),
+                width=1,
+            )
+
+        # Add code here to render the time step
+        pygame.font.init()
+        font = pygame.font.Font(None, 36)
+        text = font.render(f"Time step: {self.steps}", True, (0, 0, 0))
+        canvas.blit(text, (10, 10))
+
+        if self.render_mode == "human":
+            self.window.blit(canvas, canvas.get_rect())
+            pygame.event.pump()
+            pygame.display.update()
+            self.pyclock.tick(self.metadata["render_fps"])
+        else:   # rgb_array
+            return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
+
 
 if __name__ == "__main__":
-    import json
-    env_params = "../env_config.json"
-    with open(env_params, "r") as f:
-        env_params = json.load(f)
-
-    env = DVRPEnv(render_mode=None, **env_params)
+    env = DVRPEnv(lam=0.7, render_mode=None)
+    from stable_baselines3.common.env_checker import check_env
     check_env(env, warn=True)
-    env = FlattenObservation(env)
+    # env = FlattenObservation(env)
 
     obs, _ = env.reset()
 
-    for t in env.unwrapped.tasks_list:  # ignore
+    for t in env.tasks_list:  # ignore
         print(t)
-
 
     step = 0
     rewards = []
-    # frames = []
+    frames = []
     done = False
 
     while not done:
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
         rewards.append(reward)
-        # frame = env.render()
-        # frames.append(frame)
-        # del frame
+        frame = env.render()
+        frames.append(frame)
+        del frame
         done = terminated or truncated
         step += 1
-        if step == 50:
-            pass
         # print all relevant information
-        print(f"Step: {step}, Action: {action}, Term: {terminated}, Trunc: {truncated}, Done: {done}, Info: {info}")
+        print(f"Step: {step}, Action: {action}, Reward: {reward}, Term: {terminated}, Trunc: {truncated}, Done: {done}, Info: {info}")
         # print(env._is_agent_on_task())
         print(f"Current observation: {obs}")
         print(f"Total reward: {sum(rewards)}")
         print(f"-"*50)
+    
+    # from gymnasium.utils.save_video import save_video
+    # save_video(frames=frames, video_folder='simulations', name_prefix='dvrp', fps=2)
+
+    for t in env.tasks_list:
+        print(t)
+    print()
+    print(f"Total tasks done: {env.tasks_done}")
