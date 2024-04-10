@@ -1,5 +1,6 @@
 from enum import Enum
 import numpy as np
+from sympy import print_python
 
 class TaskStatus(Enum):
     PENDING = 0
@@ -20,7 +21,7 @@ class Task:
 
     """
 
-    def __init__(self, id:int, location:np.ndarray, time_created:float, initial_wait:float, service_time:float):
+    def __init__(self, id: int, location: np.ndarray, time_created: float, initial_wait: float, service_time: float):
         self.id = id
         self.location = location    # (x, y) coordinates
         self.time_created = time_created
@@ -49,7 +50,7 @@ class Task:
         """
         return self.status == TaskStatus.SERVICED
     
-    def service(self, time:float) -> None:
+    def service_task(self, time:float) -> None:
         """Mark the task as serviced at the given time.
 
         Args:
@@ -78,6 +79,7 @@ class Task:
         else:
             return f"Task {self.id} at {self.location} was created at time {self.time_created} and state is {self.status}"
     
+    @property
     def wait_time(self) -> float:
         """Calculate the wait time of the task.
 

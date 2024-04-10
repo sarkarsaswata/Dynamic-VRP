@@ -1,10 +1,9 @@
 # General overview: This file contains the PoissonTaskGenerator class, which is used to generate tasks based on a model Poisson process with specified parameter of task arrival rate.
-import random
 from typing import Tuple, Optional, List
 import gymnasium as gym
 import numpy as np
 import gymnasium.utils.seeding as seeding
-from dvrp.components.task import Task
+from dvrp.utils.task import Task
 
 class PoissonTaskGenerator:
     """
@@ -21,9 +20,7 @@ class PoissonTaskGenerator:
         seed (int, optional): Seed for random number generation. Defaults to None.
     """
 
-    def __init__(self, min: float = 0, total_tasks: int = 10, max_initial_wait: float = 0,
-                 service_time: float = 0, env_size: float = 10, initial_tasks: int = 1,
-                 max_time: Optional[float] = None, seed: Optional[int] = None) -> None:
+    def __init__(self, min: float = 0, total_tasks: int = 10, max_initial_wait: float = 0, service_time: float = 0, env_size: float = 10, initial_tasks: int = 1, max_time: Optional[float] = None, seed: Optional[int] = None) -> None:
         self.min: float = min
         self.total_tasks: int = total_tasks
         self.max_initial_wait: float = max_initial_wait
@@ -40,7 +37,6 @@ class PoissonTaskGenerator:
         Reset the random number generator.
         """
         self.generator, self.seed = seeding.np_random(self.seed)
-        random.seed(self.seed)
 
     def _get_location(self) -> np.ndarray:
         """
@@ -49,9 +45,11 @@ class PoissonTaskGenerator:
         Returns:
             np.ndarray: Random (x, y) coordinates for task location.
         """
-        x = round(self.generator.uniform(self.min+1, self.env_size-1), 1)
-        y = round(self.generator.uniform(self.min+1, self.env_size-1), 1)
-        return np.array([x, y], dtype=np.float32)
+        # x = round(self.generator.uniform(self.min+1, self.env_size-1), 1)
+        x = round(self.generator.uniform(self.min+1, self.env_size-1), 0)
+        # y = round(self.generator.uniform(self.min+1, self.env_size-1), 1)
+        y = round(self.generator.uniform(self.min+1, self.env_size-1), 0)
+        return np.array([x, y], dtype=np.float16)
     
     def get_tasks(self, lam: float) -> List[Task]:
         """
@@ -63,7 +61,7 @@ class PoissonTaskGenerator:
         Returns:
             List[Task]: List of generated tasks.
         """
-        first_time = round(random.expovariate(lam), 1)*10
+        first_time = round(self.generator.exponential(1/lam)*5, 0)
         tasks = []
 
         for _ in range(self.initial_tasks):
@@ -78,7 +76,7 @@ class PoissonTaskGenerator:
         
         sim_time = first_time
         while True:
-            next_time = round(random.expovariate(lam), 1)*10
+            next_time = round(self.generator.exponential(1/lam)*5, 0)
             new_task = Task(
                 id = len(tasks),
                 location = self._get_location(),
@@ -93,4 +91,12 @@ class PoissonTaskGenerator:
                     break
             if len(tasks) >= self.total_tasks:
                     break
+        if len(tasks) < self.total_tasks:
+             return self.get_tasks(lam=lam)
         return tasks
+
+if __name__ == "__main__":
+    generator = PoissonTaskGenerator(min=0, total_tasks=10, max_initial_wait=0, service_time=0, env_size=10, initial_tasks=1, max_time=200)
+    tasks = generator.get_tasks(lam=0.5)
+    for task in tasks:
+         print(task)
